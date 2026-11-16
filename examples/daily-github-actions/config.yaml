@@ -1,0 +1,17 @@
+# Settings for the daily run. Lives in the private repository, next to the workflow.
+# Any setting from config.example.yaml in the tool's repository can be used here.
+
+industry: "gaming, entertainment"
+stage: "pre-seed, seed"
+
+x:
+  max_queries: 30
+  max_posts_per_query: 10     # worst case $4.50 a day; a typical day is far less
+linkedin:
+  max_keywords: 30
+  max_posts_per_keyword: 25
+
+email:
+  to:
+    - first.person@example.com
+    - second.person@example.com
