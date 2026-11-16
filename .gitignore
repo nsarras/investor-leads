@@ -1,0 +1,22 @@
+# Secrets and personal settings
+.env
+config.yaml
+
+# Collected data and exports (contain personal data about post authors)
+data/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
