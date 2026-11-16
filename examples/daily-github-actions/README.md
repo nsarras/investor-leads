@@ -67,7 +67,15 @@ For another provider, set `SMTP_HOST` and `SMTP_PORT` in `daily.yml` to its SMTP
 - **Costs.** Each email ends with what the run used on each API. LinkedIn at this volume needs
   a paid Apify plan. A private repository also uses GitHub Actions minutes; a run typically
   takes 10 to 30 minutes, most of it waiting for the LinkedIn search.
-- **Change the time** by editing the `cron` and `timezone` lines in `daily.yml`. Scheduled runs
-  can start a few minutes late when GitHub is busy.
-- **Run it by hand** any time with the "Run workflow" button. Because only new posts are
-  reported, a second run on the same day usually sends the "no new leads" note.
+- **Timing is not exact.** GitHub can start scheduled runs late and, when it is busy, can skip
+  one altogether. The start of every hour is its busiest time, so the workflow starts at
+  6:37 AM, not on the hour, and has two backup times later in the morning. A backup does
+  nothing and sends nothing if a run has already succeeded that day.
+- **Change the time** by editing the `cron` and `timezone` lines in `daily.yml`. Keep the
+  minutes away from `0`.
+- **Run it by hand** any time with the "Run workflow" button. A manual run always goes ahead;
+  because only new posts are reported, a second run on the same day usually sends the "no new
+  leads" note.
+- **Check what happened** on the Actions tab. Each run shows whether it was started by the
+  schedule or by hand, and the "Has today's run already happened?" step says why a backup
+  stopped early.

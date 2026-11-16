@@ -7,10 +7,18 @@ name: Daily investor leads
 
 on:
   schedule:
-    # 7:00 AM Pacific, every day. GitHub may start scheduled runs a few minutes late.
-    - cron: "0 7 * * *"
+    # Main run: 6:37 AM Pacific, so the email lands around 7:00.
+    # Not on the hour on purpose: GitHub delays, and sometimes drops, scheduled runs at busy
+    # times, and the start of every hour is the busiest.
+    - cron: "37 6 * * *"
       timezone: "America/Los_Angeles"
-  workflow_dispatch: # adds a "Run workflow" button, for testing
+    # Backups, in case GitHub drops or badly delays the main run. A backup does nothing
+    # (and sends nothing) when a run has already succeeded that day.
+    - cron: "37 8 * * *"
+      timezone: "America/Los_Angeles"
+    - cron: "37 11 * * *"
+      timezone: "America/Los_Angeles"
+  workflow_dispatch: # adds a "Run workflow" button; a manual run always goes ahead
 
 permissions:
   contents: read
@@ -26,6 +34,8 @@ env:
   # Mail server. These two are not secret; change them if you do not use Gmail.
   SMTP_HOST: smtp.gmail.com
   SMTP_PORT: "587"
+  # The time zone that decides what counts as "today" for the once-a-day check.
+  LOCAL_TZ: America/Los_Angeles
 
 jobs:
   leads:
@@ -35,16 +45,8 @@ jobs:
       - name: Check out this repository (for config.yaml)
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install investor-leads
-        run: pip install "git+https://github.com/${TOOL_REPO}@${TOOL_REF}"
-
       # The database of posts already seen is what lets each run report only new leads.
-      # A fresh copy is saved after every successful run and restored the next day.
+      # A fresh copy is saved after every successful run and restored the next time.
       - name: Restore posts seen on earlier days
         uses: actions/cache@v5
         with:
@@ -53,7 +55,30 @@ jobs:
           restore-keys: |
             leads-db-
 
+      - name: Has today's run already happened?
+        id: today
+        run: |
+          today=$(TZ="$LOCAL_TZ" date +%F)
+          last=$(cat data/last-successful-run 2>/dev/null || true)
+          echo "Trigger: ${{ github.event_name }} ${{ github.event.schedule }}"
+          echo "Today: $today. Last successful run: ${last:-never}."
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$last" = "$today" ]; then
+            echo "Already done today, so this scheduled run stops here."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.today.outputs.done != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install investor-leads
+        if: steps.today.outputs.done != 'true'
+        run: pip install "git+https://github.com/${TOOL_REPO}@${TOOL_REF}"
+
       - name: Find new leads and email them
+        if: steps.today.outputs.done != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
@@ -62,4 +87,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }} # optional
           EMAIL_TO: ${{ secrets.EMAIL_TO }} # optional; overrides email.to in config.yaml
-        run: investor-leads run --days 1 --only-new --email
+        run: |
+          investor-leads run --days 1 --only-new --email
+          mkdir -p data
+          TZ="$LOCAL_TZ" date +%F > data/last-successful-run
