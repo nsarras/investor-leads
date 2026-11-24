@@ -19,13 +19,15 @@ from .models import Classification, Post
 
 POST_TEXT_MAX_CHARS = 1000
 MAX_OTHER_LINKS = 3
+# A named investor reported in this many separate posts is lifted from medium to medium-high.
+CORROBORATING_POSTS = 3
 
 AUTHOR, NAMED = "Wrote the post", "Named in a post"
 NAMED_SIGNAL = {"invested": "made an investment", "launched_fund": "launched a fund", "seeking_deals": "seeking deals"}
 
 # (header, column width in Excel). One sheet holds both kinds of lead.
 LEAD_COLUMNS: list[tuple[str, int]] = [
-    ("Confidence", 11),
+    ("Confidence", 13),
     ("Lead type", 16),
     ("Name", 26),
     ("Firm", 24),
@@ -74,7 +76,7 @@ AUDIT_COLUMNS: list[tuple[str, int]] = [
 ]
 LINK_HEADERS = {"Post link", "Profile link"}
 WRAP_HEADERS = {"Why", "Post text", "Bio / headline", "Other posts", "Named investors"}
-CONFIDENCE_FILL = {"high": "C6EFCE", "medium": "FFEB9C", "low": "F2F2F2"}
+CONFIDENCE_FILL = {"high": "C6EFCE", "medium-high": "E2F0B6", "medium": "FFEB9C", "low": "F2F2F2"}
 
 # Excel cannot store these control characters.
 _ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -101,6 +103,7 @@ class Lead:
     profile_url: str = ""
     posts: list[str] = field(default_factory=list)  # every post URL supporting this lead
     person: str = ""  # set when a named person has been folded into their firm's row
+    corroborated: bool = False  # lifted to medium-high because several posts report it
 
     def strength(self) -> tuple[int, int, int]:
         """Sort key: stronger leads sort first."""
@@ -215,6 +218,9 @@ def build_leads(classified: list[tuple[Post, Classification]], min_confidence: s
     """
     authors: dict[str, list[Lead]] = {}
     named: dict[str, list[Lead]] = {}
+    # Medium mentions are gathered even when only medium-high is wanted, because several of
+    # them together can lift an investor to medium-high. The final list is filtered below.
+    wanted, min_confidence = min_confidence, ("medium" if min_confidence == "medium-high" else min_confidence)
 
     for post, c in classified:
         confidence = author_confidence(c)
@@ -270,7 +276,21 @@ def build_leads(classified: list[tuple[Post, Classification]], min_confidence: s
         groups.append(group + named.pop(match) if match else group)
     groups.extend(named.values())
 
-    return _strongest_first([_one_row(group) for group in groups])
+    rows = [_lift_if_corroborated(_one_row(group)) for group in groups]
+    return _strongest_first([row for row in rows if meets(row.confidence, wanted)])
+
+
+def _lift_if_corroborated(lead: Lead) -> Lead:
+    """Several separate posts reporting the same investor's deal make a medium lead a stronger one."""
+    if (
+        lead.confidence == "medium"
+        and lead.lead_type == NAMED
+        and lead.investor_type != "other"
+        and len(lead.posts) >= CORROBORATING_POSTS
+    ):
+        lead.confidence = "medium-high"
+        lead.corroborated = True
+    return lead
 
 
 def _lead_row(lead: Lead) -> list[Any]:
@@ -312,8 +332,14 @@ def _listed(confidence: str | None, min_confidence: str) -> str:
     return confidence if meets(confidence, min_confidence) else f"{confidence}, not listed"
 
 
-def _audit_row(post: Post, c: Classification, min_confidence: str) -> list[Any]:
-    named = "; ".join(f"{n.name} ({_listed(named_confidence(n), min_confidence)})" for n in c.named_investors)
+def _audit_row(post: Post, c: Classification, min_confidence: str, lifted: frozenset[str] = frozenset()) -> list[Any]:
+    def rating(n: Any) -> str:
+        confidence = named_confidence(n)
+        if confidence == "medium" and entity_key(n.name) in lifted:
+            confidence = "medium-high"  # reported in several posts; see CORROBORATING_POSTS
+        return _listed(confidence, min_confidence)
+
+    named = "; ".join(f"{n.name} ({rating(n)})" for n in c.named_investors)
     return [
         _listed(author_confidence(c), min_confidence),
         named,
@@ -406,7 +432,8 @@ def export(
     output_dir.mkdir(parents=True, exist_ok=True)
     leads = build_leads(classified, min_confidence)
     lead_rows = [_lead_row(lead) for lead in leads]
-    audit_rows = [_audit_row(post, c, min_confidence) for post, c in classified]
+    lifted = frozenset(entity_key(lead.name) for lead in leads if lead.corroborated)
+    audit_rows = [_audit_row(post, c, min_confidence, lifted) for post, c in classified]
 
     csv_path, xlsx_path = output_dir / f"{name}.csv", output_dir / f"{name}.xlsx"
     write_csv(csv_path, lead_rows)

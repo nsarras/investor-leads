@@ -39,7 +39,7 @@ A CSV and an Excel file with one row per lead:
 
 | Column | Example |
 |---|---|
-| Confidence | high or medium (see below) |
+| Confidence | high, medium-high or medium (see below) |
 | Lead type | "Wrote the post" or "Named in a post" |
 | Name, Firm, Role | Ana Ruiz, Pixel Ventures, General Partner |
 | Signal | seeking deals / new fund / announced investment / thesis or commentary; for named leads: made an investment / launched a fund / seeking deals |
@@ -56,6 +56,14 @@ Each investor appears once, however many posts mention them: spelling variants o
 
 - **Wrote the post:** the author is an investor. Confidence is *high* for an explicit signal (asking for pitches, a new fund) from someone who fits your industry and stage, and *medium* for a softer signal such as an investment announcement or thesis. Individual and angel investors are ranked exactly like funds and firms.
 - **Named in a post:** someone else's post, usually a funding announcement, shows them making an investment, launching a fund or looking for deals in one of your industries. Confidence is *medium* when the stage is not ruled out. Named leads never rate high, because a deal shows activity but not that they are asking for pitches.
+
+**Medium-high is the stronger half of medium.** A medium lead is rated *medium-high* when the evidence is firmer:
+
+- an author who says they invest at one of your stages, or whose intent score is 60 or more;
+- a named investor whose kind is clear (a fund, an angel, an accelerator) and whose deal is at one of your stages, or who has launched a fund or is looking for deals;
+- a named investor reported in three or more separate posts.
+
+Add `--min-confidence medium-high` to list only these and the high leads. In a one-week test that kept 30 of 58 leads.
 
 **Low-confidence leads are left out by default.** These are partial fits: generalists, investors whose focus is not stated, a stage that looks wrong, investors in your industry whose post is not an investing signal, and studios, publishers and other companies that fund projects without being investment firms. Add `--min-confidence low` to include them. The "All classified" sheet shows them either way, marked "low, not listed".
 
@@ -110,7 +118,7 @@ investor-leads export --industry "gaming, entertainment" --stage "pre-seed, seed
 | `--stage` | One or more funding stages, comma-separated: `"pre-seed, seed"` |
 | `--days` | How far back to look (default 7) |
 | `--platforms` | `x`, `linkedin`, or both (default) |
-| `--min-confidence` | Weakest leads to include: `medium` (default), `high`, or `low` to add partial fits |
+| `--min-confidence` | Weakest leads to include: `medium` (default), `medium-high`, `high`, or `low` to add partial fits |
 | `--searches` | Searches to run on each platform (default 12) |
 | `--posts-per-search` | Posts to read from each search (default 25) |
 | `--only-new` | List only leads from posts found for the first time in this run |
@@ -182,13 +190,14 @@ You pay each provider directly. Every run ends with a summary of what it used on
 | Provider | What is billed | With default settings |
 |---|---|---|
 | X API | $0.005 per post returned, plus $0.010 per author profile | At most $4.50 per run (12 searches x 25 posts). The run prints the estimate first and skips X if it exceeds `x.max_cost_usd`. |
-| Apify (LinkedIn) | Set by the Actor; the default lists $1.60 per 1,000 posts | At most 300 posts per run (12 searches x 25 posts), with a $3 spending limit passed to Apify |
+| Apify (LinkedIn) | Set by the Actor; the default lists $1.60 per 1,000 posts | At most 300 posts per run (12 searches x 25 posts), with a $3 spending limit passed to Apify for each Actor run. Set `linkedin.max_cost_usd` for a budget across the whole run |
 | Anthropic | Tokens; the default model is Claude Haiku 5.5 | Typically cents per run |
 
 Things to know:
 
 - **X only searches the last 7 days.** `--days` above 7 applies to LinkedIn only. To cover longer periods on X, run the tool at least weekly; results accumulate in the local database.
 - **Searches are capped, not exhaustive.** Each run reads a bounded number of posts per search. Use `--searches` and `--posts-per-search` (or `config.yaml`) for more coverage. Many narrow searches find more investors than a few broad ones.
+- **Set a LinkedIn budget for big runs.** `linkedin.max_cost_usd` in `config.yaml` is the most the tool will spend on Apify in one run. Keywords are searched in order of how often their posts turned into leads over the last 30 days, so when the budget runs out it is the weakest keywords that go unsearched. The cost summary then shows how many keywords were reached. In a one-week test, a third of the posts held every lead, so a budget well below the worst case loses little.
 - **LinkedIn has been the better source in testing.** Investors and funding news are concentrated there; X returns more off-topic posts for the same spend.
 - **X replies are skipped** (`x.exclude_replies`), since they are mostly conversation.
 - **Setting `x.include_author_profile: false`** cuts X cost by two thirds, but the model then cannot see the author's bio and will miss investors who do not say so in the post.

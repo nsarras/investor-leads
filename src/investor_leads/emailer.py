@@ -81,7 +81,7 @@ def compose(result: Any, settings: Settings, *, sender: str, to: list[str], when
 
     lines: list[str] = []
     if leads:
-        breakdown = ", ".join(f"{count} {level}" for level, count in result.leads_by_confidence.items())
+        breakdown = ", ".join(f"{count} {level}" for level, count in result.leads_by_confidence.items() if count)
         subject = f"Investor leads, {day}: {len(leads)} {new}({breakdown})"
         lines.append(f"{len(leads)} {new}investor leads from posts in {window}: {breakdown}.")
     else:

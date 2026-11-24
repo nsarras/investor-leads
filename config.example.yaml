@@ -1,5 +1,5 @@
 # Copy to config.yaml and edit. Every setting is optional; the values shown are the defaults.
-# --industry, --stage, --days and --min-score on the command line override this file.
+# --industry, --stage, --days and --min-confidence on the command line override this file.
 
 # One or more values each, comma-separated (a YAML list also works).
 # An investor matches if they cover any one industry and any one stage.
@@ -10,7 +10,7 @@ days: 7                 # how far back to look
 model: claude-haiku-5-5 # Anthropic model used to plan searches and classify posts
 batch_size: 10          # posts per classification call
 classify_workers: 4     # classification calls made at the same time
-min_confidence: medium  # weakest leads to export: medium (default), high, or low to add partial fits
+min_confidence: medium  # weakest leads to export: medium (default), medium-high, high, or low to add partial fits
 
 data_dir: data          # local database of posts and classifications
 output_dir: output      # where the CSV and Excel files are written
@@ -31,7 +31,9 @@ linkedin:
   max_keywords: 12
   max_posts_per_keyword: 25
   max_keywords_per_run: 20  # most keywords the Actor accepts per run; longer lists are split
-  max_charge_usd: 3.0       # Apify spending limit for the run; null to disable
+  max_cost_usd: null        # most to spend on Apify per run of this tool, e.g. 3.0; null for no overall limit.
+                            # Keywords that produced leads before are searched first, so the budget goes to those.
+  max_charge_usd: 3.0       # Apify spending limit for each single Actor run; null to disable
   run_timeout_seconds: 900
   # To use a different Actor, change actor_id and describe its input and output here.
   # "$keywords" (list), "$max_posts" (number) and "$since_date" (YYYY-MM-DD) are filled in.

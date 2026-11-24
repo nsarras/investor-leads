@@ -22,6 +22,8 @@ from . import CollectorAuthError, CollectorError
 API = "https://api.apify.com/v2"
 TERMINAL = {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}
 POLL_WAIT_SECONDS = 30
+# With less than this left of the budget, another Actor run is not worth starting.
+MIN_RUN_BUDGET_USD = 0.05
 
 
 def dig(item: Any, path: str) -> Any:
@@ -65,47 +67,89 @@ class LinkedInCollector:
         self.items = 0
         self.cost_usd = 0.0
         self.cost_known = True
+        # How far down the keyword list the budget (linkedin.max_cost_usd) let us go.
+        self.keywords_total = 0
+        self.keywords_searched = 0
+        self._spent = 0.0  # counted against the budget; a run of unknown cost counts as its limit
 
     def search(self, keywords: list[str], since: date, max_posts_per_keyword: int) -> list[Post]:
         """Return posts dated on or after `since` for all keywords.
 
         Actors limit how many keywords one run accepts, so long lists are split across
         several runs. If a later run fails, the posts already collected are kept.
+
+        Keywords are searched in the order given. With `linkedin.max_cost_usd` set, searching
+        stops once that much has been spent, so the keywords at the end of the list are the
+        ones left out: put the most useful first.
         """
         size = max(1, self._settings.max_keywords_per_run)
         chunks = [keywords[i : i + size] for i in range(0, len(keywords), size)]
+        budget = self._settings.max_cost_usd
+        self.keywords_total += len(keywords)
         posts: list[Post] = []
         for number, chunk in enumerate(chunks, start=1):
+            remaining = None if budget is None else budget - self._spent
+            if remaining is not None and remaining < MIN_RUN_BUDGET_USD:
+                left = sum(len(c) for c in chunks[number - 1 :])
+                self._log(f"  Apify budget of ${budget:.2f} reached: {left} of {len(keywords)} keywords were not searched")
+                break
             if len(chunks) > 1:
                 self._log(f"  run {number} of {len(chunks)}: {len(chunk)} keywords")
             try:
-                posts.extend(self._search_once(chunk, since, max_posts_per_keyword))
+                posts.extend(self._search_once(chunk, since, max_posts_per_keyword, remaining))
             except CollectorError as exc:
                 if not posts:
                     raise
                 self._log(f"  ! stopped after {number - 1} of {len(chunks)} runs: {exc}")
                 break
+            self.keywords_searched += len(chunk)
         return posts
 
-    def _search_once(self, keywords: list[str], since: date, max_posts_per_keyword: int) -> list[Post]:
+    def _search_once(
+        self, keywords: list[str], since: date, max_posts_per_keyword: int, remaining: float | None = None
+    ) -> list[Post]:
         if not keywords:
             return []
         actor_input = fill_input(
             self._settings.input,
             {"keywords": keywords, "max_posts": max_posts_per_keyword, "since_date": since.isoformat()},
         )
-        run = self._start(actor_input)
+        limit = self._run_limit(remaining)
+        run = self._start(actor_input, limit)
         run = self._wait(run)
-        if run.get("status") != "SUCCEEDED":
-            raise CollectorError(
-                f"Apify run {run.get('id')} ended with status {run.get('status')}. "
-                "Open the run in the Apify Console to see its log."
+        dataset = str(run.get("defaultDatasetId") or "")
+        if run.get("status") == "SUCCEEDED":
+            items = self._items(dataset)
+        else:
+            # A run stopped early (by its spending limit, say) has still been paid for, so
+            # keep whatever it returned.
+            items = self._items_if_any(dataset)
+            if not items:
+                raise CollectorError(
+                    f"Apify run {run.get('id')} ended with status {run.get('status')}. "
+                    "Open the run in the Apify Console to see its log."
+                )
+            self._log(
+                f"  ! Apify run {run.get('id')} ended with status {run.get('status')}; "
+                f"keeping the {len(items)} items it returned"
             )
-        items = self._items(str(run.get("defaultDatasetId")))
-        self._record_usage(run, len(items))
+        self._record_usage(run, len(items), limit)
         return self._to_posts(items, since)
 
-    def _record_usage(self, run: dict[str, Any], items: int) -> None:
+    def _run_limit(self, remaining: float | None) -> float | None:
+        """Spending limit for one Actor run: the per-run cap or what is left of the budget, whichever is lower."""
+        limits = [value for value in (self._settings.max_charge_usd, remaining) if value is not None]
+        return round(min(limits), 4) if limits else None
+
+    def _items_if_any(self, dataset_id: str) -> list[dict[str, Any]]:
+        if not dataset_id:
+            return []
+        try:
+            return self._items(dataset_id)
+        except CollectorError:
+            return []
+
+    def _record_usage(self, run: dict[str, Any], items: int, limit: float | None = None) -> None:
         """Read the run's cost from Apify. The figure is final once the run has finished."""
         self.runs += 1
         self.items += items
@@ -118,8 +162,10 @@ class LinkedInCollector:
             pass
         if isinstance(cost, (int, float)):
             self.cost_usd += float(cost)
+            self._spent += float(cost)
         else:
             self.cost_known = False
+            self._spent += limit or 0.0
 
     def _request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
         try:
@@ -139,11 +185,11 @@ class LinkedInCollector:
             raise CollectorError(f"Apify returned {response.status_code}: {response.text[:300]}")
         return response.json()
 
-    def _start(self, actor_input: dict[str, Any]) -> dict[str, Any]:
+    def _start(self, actor_input: dict[str, Any], limit: float | None = None) -> dict[str, Any]:
         actor = self._settings.actor_id.replace("/", "~")
         params: dict[str, Any] = {}
-        if self._settings.max_charge_usd is not None:
-            params["maxTotalChargeUsd"] = self._settings.max_charge_usd
+        if limit is not None:
+            params["maxTotalChargeUsd"] = limit
         body = self._request("POST", f"{API}/acts/{actor}/runs", params=params, json=actor_input)
         return dict(body.get("data") or {}) if isinstance(body, dict) else {}
 

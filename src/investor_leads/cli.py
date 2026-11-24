@@ -26,8 +26,8 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help=f"Path to a YAML config file (default: {DEFAULT_CONFIG} if present)")
     parser.add_argument(
         "--min-confidence",
-        choices=["low", "medium", "high"],
-        help="Weakest leads to include (default medium; use low to add partial fits)",
+        choices=["low", "medium", "medium-high", "high"],
+        help="Weakest leads to include (default medium; low adds partial fits, medium-high keeps only the stronger ones)",
     )
     parser.add_argument("--email", action="store_true", help="Email the spreadsheet to the recipients in config.yaml")
     parser.add_argument("--email-to", help="Comma-separated recipients, instead of the ones in config.yaml")

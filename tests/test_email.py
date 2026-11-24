@@ -88,13 +88,13 @@ def test_email_with_leads_has_summary_and_spreadsheet(tmp_path):
     s.days = 1
     message = compose(result, s, sender="me@example.com", to=["a@example.com", "b@example.com"], when=WHEN, only_new=True)
 
-    assert message["Subject"] == "Investor leads, Nov 15: 3 new (1 high, 2 medium)"
+    assert message["Subject"] == "Investor leads, Nov 15: 3 new (1 high, 2 medium-high)"
     assert (message["From"], message["To"]) == ("me@example.com", "a@example.com, b@example.com")
     body = message.get_body(preferencelist=("plain",)).get_content()
-    assert "3 new investor leads from posts in the last day: 1 high, 2 medium." in body
+    assert "3 new investor leads from posts in the last day: 1 high, 2 medium-high." in body
     assert "Industries: Gaming, Entertainment" in body and "Posts read: 3" in body
     assert "1. [high] Person 1 (Pixel Ventures): seeking deals" in body
-    assert "https://example.com/linkedin/1" in body and "[medium] Merak Capital: made an investment" in body
+    assert "https://example.com/linkedin/1" in body and "[medium-high] Merak Capital: made an investment" in body
     assert "API costs for this run:" in body
 
     attachments = list(message.iter_attachments())
@@ -167,7 +167,7 @@ def test_only_new_lists_leads_from_posts_first_seen_in_this_run(tmp_path):
     second, logs = do_run(tmp_path, FakeX([make_post(1), make_post(5)]),
                           FakeLinkedIn([make_news(1), make_news(2, investor="Play Ventures")]), llm=llm, only_new=True)
     assert [r["Name"] for r in read_csv(second.csv_path)] == ["Person 5", "Play Ventures"]
-    assert second.posts_considered == 2 and any("2 new leads (1 high, 1 medium)" in line for line in logs)
+    assert second.posts_considered == 2 and any("2 new leads (1 high, 1 medium-high)" in line for line in logs)
 
     # A third run with nothing new is a quiet day; without --only-new everything is still there.
     third, _ = do_run(tmp_path, FakeX([make_post(1), make_post(5)]), FakeLinkedIn([make_news(1)]), llm=llm, only_new=True)

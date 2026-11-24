@@ -17,6 +17,9 @@ X_PRICE_PER_USER = 0.010
 # X recent search only reaches back this far.
 X_MAX_DAYS = 7
 
+# Accepted values for min_confidence, weakest first.
+CONFIDENCE_CHOICES = ("low", "medium", "medium-high", "high")
+
 DEFAULT_LINKEDIN_INPUT: dict[str, Any] = {
     "search": "$keywords",
     "maxPosts": "$max_posts",
@@ -66,7 +69,11 @@ class LinkedInSettings:
     max_posts_per_keyword: int = 25
     # Most keywords the Actor accepts in one run; longer lists are split across runs.
     max_keywords_per_run: int = 20
-    # Passed to Apify as the run's spending limit. Set to null to disable.
+    # The most to spend on Apify in one run of this tool, across all Actor runs. Searching
+    # stops when it is reached. Keywords that produced leads before are searched first, so
+    # the budget goes to the ones that work. null means no overall limit.
+    max_cost_usd: float | None = None
+    # Spending limit passed to Apify for each single Actor run. Set to null to disable.
     max_charge_usd: float | None = 3.0
     run_timeout_seconds: int = 900
     # Actor input. "$keywords", "$max_posts" and "$since_date" are filled in per run.
@@ -95,7 +102,8 @@ class Settings:
     # Classification calls made at the same time. Raise for big runs; lower if rate-limited.
     classify_workers: int = 4
     # Weakest leads to export. "medium" leaves out low-confidence leads (partial fits);
-    # "low" includes them; "high" keeps only explicit asks.
+    # "low" includes them; "medium-high" keeps only the stronger half of the medium leads
+    # plus the high ones; "high" keeps only explicit asks.
     min_confidence: str = "medium"
     data_dir: Path = Path("data")
     output_dir: Path = Path("output")
@@ -142,8 +150,10 @@ class Settings:
             raise ConfigError("classify_workers must be between 1 and 16.")
         if self.linkedin.max_keywords_per_run < 1:
             raise ConfigError("linkedin.max_keywords_per_run must be at least 1.")
-        if self.min_confidence not in ("low", "medium", "high"):
-            raise ConfigError("min_confidence must be low, medium or high.")
+        if self.min_confidence not in CONFIDENCE_CHOICES:
+            raise ConfigError("min_confidence must be low, medium, medium-high or high.")
+        if self.linkedin.max_cost_usd is not None and self.linkedin.max_cost_usd <= 0:
+            raise ConfigError("linkedin.max_cost_usd must be more than 0, or null for no limit.")
         for name in ("max_queries", "max_posts_per_query"):
             if getattr(self.x, name) < 1:
                 raise ConfigError(f"x.{name} must be at least 1.")
@@ -228,7 +238,7 @@ def _apply(target: Any, data: dict[str, Any], path: str = "") -> None:
             if not all(isinstance(v, str) for v in value):
                 raise ConfigError(f"`{key}` must be text or a list of text items.")
             setattr(target, key, ", ".join(value))
-        elif key == "max_charge_usd":
+        elif key == "max_charge_usd" or (key == "max_cost_usd" and path == "linkedin."):
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
                 raise ConfigError(f"`{path}{key}` must be a number or null.")
             setattr(target, key, value)

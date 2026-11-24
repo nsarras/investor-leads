@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from investor_leads.classifier import CLASSIFIER_VERSION
 from investor_leads.collectors import CollectorAuthError
-from investor_leads.config import ConfigError, Keys, Settings, load_settings
+from investor_leads.config import ConfigError, Keys, LinkedInSettings, Settings, load_settings
 from investor_leads.export import AUTHOR, LEAD_COLUMNS, NAMED
 from investor_leads.pipeline import export_only, run
 from investor_leads.planner import PLAN_VERSION
@@ -71,8 +71,8 @@ def test_end_to_end_writes_leads(tmp_path):
     assert result.new_posts == 4 and result.classified == 4
     # Two investors asking for pitches are high. The investor with no signal is low, which is
     # left out by default; the founder is not a lead.
-    assert result.leads == 2 and result.leads_by_confidence == {"high": 2, "medium": 0}
-    assert any("2 leads (2 high, 0 medium)" in line for line in logs)
+    assert result.leads == 2 and result.leads_by_confidence == {"high": 2, "medium-high": 0, "medium": 0}
+    assert any("2 leads (2 high) written to" in line for line in logs)  # empty levels are not listed
     assert result.csv_path.name == "leads-gaming-entertainment-seed-2026-11-14.csv"
     assert li.calls[0][0] == ["investing in gaming startups", "gaming startup raises seed"]
 
@@ -98,8 +98,8 @@ def test_investors_named_in_news_become_leads_on_the_same_sheet(tmp_path):
     rows = read_csv(result.csv_path)
     assert [(r["Name"], r["Lead type"], r["Confidence"]) for r in rows] == [
         ("Person 1", AUTHOR, "high"),
-        ("Merak Capital", NAMED, "medium"),   # three outlets, one row
-        ("Play Ventures", NAMED, "medium"),
+        ("Merak Capital", NAMED, "medium-high"),   # three outlets, one row; a seed round by a VC firm
+        ("Play Ventures", NAMED, "medium-high"),
     ]
     merak = rows[1]
     assert merak["Mentions"] == "3"
@@ -111,7 +111,7 @@ def test_investors_named_in_news_become_leads_on_the_same_sheet(tmp_path):
 
     audit = load_workbook(result.xlsx_path)["All classified"]
     named_col = [c.value for c in audit[1]].index("Named investors") + 1
-    assert "Merak Capital (medium)" in {audit.cell(row=r, column=named_col).value for r in range(2, audit.max_row + 1)}
+    assert "Merak Capital (medium-high)" in {audit.cell(row=r, column=named_col).value for r in range(2, audit.max_row + 1)}
 
 
 def test_min_confidence_sets_what_is_listed(tmp_path):
@@ -123,7 +123,7 @@ def test_min_confidence_sets_what_is_listed(tmp_path):
 
     s.min_confidence = "low"
     result = export_only(s, now=NOW, log=lambda m: None)
-    assert result.leads_by_confidence == {"high": 1, "medium": 1, "low": 1}
+    assert result.leads_by_confidence == {"high": 1, "medium-high": 1, "medium": 0, "low": 1}
     assert [r["Name"] for r in read_csv(result.csv_path)] == ["Person 1", "Merak Capital", "Person 3"]
 
     s.min_confidence = "high"
@@ -382,7 +382,7 @@ def test_partners_are_folded_into_their_firm():
 
     firm = "Archetype Media Finance"
     classified = [
-        _news_with([_named(firm, kind="other", action="launched_fund"),
+        _news_with([_named(firm, kind="family_office", action="launched_fund"),
                     _named("Matthew Shreder", firm=firm), _named("Tyler Condon", firm=firm)], 1),
         _news_with([_named("Lutz Meschke", firm="Wealthgate Family Office")], 2),   # one person, firm not a lead
         _news_with([_named("Ana Ruiz", firm="Pixel Ventures"), _named("Bo Chen", firm="Pixel Ventures")], 3),
@@ -390,7 +390,7 @@ def test_partners_are_folded_into_their_firm():
     leads = {lead.name: lead for lead in build_leads(classified, "low")}
     assert set(leads) == {firm, "Lutz Meschke", "Pixel Ventures"}
     assert leads[firm].why.endswith("People named: Matthew Shreder, Tyler Condon.")
-    assert leads[firm].investor_type == "other"                      # the firm's own entry leads the row
+    assert leads[firm].investor_type == "family_office"              # the firm's own entry leads the row
     assert leads["Lutz Meschke"].firm == "Wealthgate Family Office"   # stays a person row
     assert "People named: Ana Ruiz, Bo Chen." in leads["Pixel Ventures"].why
 
@@ -452,3 +452,116 @@ def test_cost_summary_handles_unknown_amounts_and_dry_runs(tmp_path):
     assert anthropic_cost("claude-sonnet-5-5", 1_000_000, 0) == pytest.approx(2.0)
     assert anthropic_cost("mystery", 1, 1) is None and format_costs([]) == []
     assert format_costs([CostLine("X", "1 post", 0.005, "estimate")])[-1].split()[-1] == "$0.01"
+
+
+# ---- medium-high: the stronger half of the medium leads -----------------------------------------
+
+def test_medium_high_keeps_only_the_stronger_leads(tmp_path):
+    from investor_leads.export import build_leads, export
+    from investor_leads.models import NamedInvestor
+
+    weak = NamedInvestor("Quiet Capital", kind="vc_firm", action="invested", evidence="Joined a round.",
+                         industry_match="yes", stage_match="unknown")          # stage not stated: medium
+    classified = [_news_with([_named("Play Ventures")], 1), _news_with([weak], 2)]
+    assert [(lead.name, lead.confidence) for lead in build_leads(classified, "medium")] == [
+        ("Play Ventures", "medium-high"), ("Quiet Capital", "medium")]
+    assert [lead.name for lead in build_leads(classified, "medium-high")] == ["Play Ventures"]
+
+    _, xlsx, _ = export(classified, tmp_path, "leads", "medium-high")
+    audit = load_workbook(xlsx)["All classified"]
+    named_col = [c.value for c in audit[1]].index("Named investors") + 1
+    assert {audit.cell(row=r, column=named_col).value for r in (2, 3)} == {
+        "Play Ventures (medium-high)", "Quiet Capital (medium, not listed)"}
+
+    s = settings(tmp_path, min_confidence="medium-high")
+    s.validate()
+    result, logs = do_run(tmp_path, FakeX([make_post(1)]), FakeLinkedIn([make_news(1)]), s=s)
+    assert result.leads_by_confidence == {"high": 1, "medium-high": 1}
+
+
+# ---- spending the Apify budget on the searches that work ---------------------------------------
+
+def test_rank_searches_puts_proven_first_and_duds_last():
+    from investor_leads.pipeline import rank_searches
+
+    lead = _news_with([_named("Play Ventures")], 1)[1]
+    nothing = _news_with([], 2)[1]
+    history = ([("good one", lead)] * 3 + [("good one", nothing)] * 7      # 3 leads in 10 posts
+               + [("Mixed  CASE", lead)] + [("mixed case", nothing)] * 9  # 1 in 10; spacing and case ignored
+               + [("dud", nothing)] * 30 + [("not in the plan", lead)] * 5)
+    ordered, counts = rank_searches(["dud", "never tried", "mixed case", "good one"], history, "medium")
+    assert ordered == ["good one", "mixed case", "never tried", "dud"]
+    assert counts == {"proven": 2, "untried": 1, "unproductive": 1}
+    # What counts as a lead follows min_confidence: at "high" nothing here is one, so the order is unchanged.
+    assert rank_searches(["dud", "never tried", "good one"], history, "high")[0] == ["dud", "never tried", "good one"]
+    # No history: the plan's own order stands.
+    assert rank_searches(["b", "a"], [], "medium") == (["b", "a"], {"proven": 0, "untried": 2, "unproductive": 0})
+
+
+def test_linkedin_keywords_that_produced_leads_are_searched_first(tmp_path):
+    dud = make_post(7, investor=False, seeking=False, platform="linkedin")
+    dud.matched_query = "investing in gaming startups"       # the plan's first keyword finds nothing useful
+    li = FakeLinkedIn([dud, make_news(1)])                    # its second finds a funding announcement
+    _, logs = do_run(tmp_path, FakeX([]), li)
+    assert li.calls[0][0] == ["investing in gaming startups", "gaming startup raises seed"]
+    assert not any("best first" in line for line in logs)    # nothing to go on yet
+
+    _, logs = do_run(tmp_path, FakeX([]), li)
+    assert li.calls[1][0] == ["gaming startup raises seed", "investing in gaming startups"]
+    assert any("searched best first" in line and "1 have produced leads, 0 are untried, 1 have produced none" in line
+               for line in logs)
+
+
+def test_apify_budget_is_shown_and_validated(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("industry: gaming\nstage: seed\nmin_confidence: medium-high\nlinkedin:\n  max_cost_usd: 3\n"
+                    "x:\n  max_cost_usd:\n")
+    s = load_settings(path)
+    s.validate()
+    assert (s.linkedin.max_cost_usd, s.x.max_cost_usd, s.min_confidence) == (3, 5.0, "medium-high")
+    path.write_text("industry: gaming\nstage: seed\nlinkedin:\n  max_cost_usd: null\n")
+    assert load_settings(path).linkedin.max_cost_usd is None
+    with pytest.raises(ConfigError, match="linkedin.max_cost_usd"):
+        Settings(industry="x", stage="seed", linkedin=LinkedInSettings(max_cost_usd=0)).validate()
+    with pytest.raises(ConfigError, match="number or null"):
+        path.write_text("industry: gaming\nstage: seed\nlinkedin:\n  max_cost_usd: lots\n")
+        load_settings(path)
+
+    s = settings(tmp_path)
+    s.linkedin.max_cost_usd = 3.0
+    _, logs = do_run(tmp_path, FakeX([]), FakeLinkedIn([]), s=s, dry_run=True)
+    assert any("Apify budget $3.00 for this run" in line for line in logs)
+
+
+def test_cost_summary_says_when_the_budget_cut_the_search_short(tmp_path):
+    li = FakeLinkedIn([make_news(1)])
+    li.runs, li.items, li.cost_usd, li.cost_known = 4, 1800, 2.97, True
+    li.keywords_searched, li.keywords_total = 80, 160
+    result, logs = do_run(tmp_path, FakeX([]), li)
+    apify = next(line for line in result.costs if line.provider == "Apify")
+    assert apify.detail == "4 runs, 1,800 items, 80 of 160 keywords" and apify.usd == 2.97
+
+
+def test_investor_reported_in_three_posts_is_lifted_to_medium_high(tmp_path):
+    from investor_leads.export import build_leads, export
+    from investor_leads.models import NamedInvestor
+
+    def mention(name, kind="vc_firm"):
+        return NamedInvestor(name, kind=kind, action="invested", evidence="Led a round.", industry_match="yes",
+                             stage_match="unknown")
+
+    classified = ([_news_with([mention("Merak Capital")], n) for n in (1, 2, 3)]
+                  + [_news_with([mention("Twice Named")], n) for n in (4, 5)]
+                  + [_news_with([mention("Unclear Entity", kind="other")], n) for n in (6, 7, 8)])
+    leads = build_leads(classified, "medium")
+    assert {lead.name: lead.confidence for lead in leads} == {
+        "Merak Capital": "medium-high", "Twice Named": "medium", "Unclear Entity": "medium"}
+    assert leads[0].name == "Merak Capital"                              # and it sorts ahead of the others
+    assert [lead.name for lead in build_leads(classified, "medium-high")] == ["Merak Capital"]
+    assert build_leads(classified, "high") == []
+
+    _, xlsx, _ = export(classified, tmp_path, "leads", "medium-high")
+    audit = load_workbook(xlsx)["All classified"]
+    named_col = [c.value for c in audit[1]].index("Named investors") + 1
+    assert {audit.cell(row=r, column=named_col).value for r in range(2, 10)} == {
+        "Merak Capital (medium-high)", "Twice Named (medium, not listed)", "Unclear Entity (medium, not listed)"}

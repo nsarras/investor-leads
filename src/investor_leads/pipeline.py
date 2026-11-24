@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .classifier import CLASSIFIER_VERSION, CONFIDENCE_LEVELS, classify_posts
+from .classifier import CLASSIFIER_VERSION, CONFIDENCE_LEVELS, classify_posts, is_lead
 from .collectors import CollectorAuthError, CollectorError
 from .collectors.linkedin import LinkedInCollector
 from .collectors.x import XCollector, estimate_cost
@@ -21,11 +21,17 @@ from .config import X_MAX_DAYS, ConfigError, Keys, Settings
 from .costs import CostLine, anthropic_cost, format_costs, x_cost
 from .export import export
 from .llm import AnthropicJSON
-from .models import Post, QueryPlan
+from .models import Classification, Post, QueryPlan
 from .planner import PLAN_VERSION, plan_queries
 from .store import Store, now_stamp
 
 Log = Callable[[str], None]
+
+# How far back to look when judging which searches have been worth their cost.
+SEARCH_HISTORY_DAYS = 30
+# A search with little history is assumed to be average. This many posts of evidence
+# count as much as that assumption.
+PRIOR_POSTS = 20
 
 
 @dataclass
@@ -110,6 +116,46 @@ def resolve_plan(
     )
 
 
+def _norm_query(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def rank_searches(
+    searches: list[str], history: list[tuple[str, Classification]], min_confidence: str
+) -> tuple[list[str], dict[str, int]]:
+    """Order searches by how often the posts they found turned into leads.
+
+    `history` is (search, classification) for posts collected earlier. Each search is scored
+    by the share of its posts that produced a lead at `min_confidence` or stronger. A search
+    with no history is assumed to be average, so it is tried ahead of the ones known to
+    produce nothing. Ties keep their original order.
+
+    Returns the ordered searches and a count of each kind: proven, untried, unproductive.
+    """
+    posts: dict[str, int] = {}
+    leads: dict[str, int] = {}
+    for search, classification in history:
+        key = _norm_query(search)
+        posts[key] = posts.get(key, 0) + 1
+        if is_lead(classification, min_confidence):
+            leads[key] = leads.get(key, 0) + 1
+    known = {_norm_query(s) for s in searches}
+    total_posts = sum(count for key, count in posts.items() if key in known)
+    total_leads = sum(count for key, count in leads.items() if key in known)
+    average = total_leads / total_posts if total_posts else 0.0
+
+    def score(search: str) -> float:
+        key = _norm_query(search)
+        return (leads.get(key, 0) + PRIOR_POSTS * average) / (posts.get(key, 0) + PRIOR_POSTS)
+
+    ordered = sorted(searches, key=lambda s: -score(s))
+    counts = {"proven": 0, "untried": 0, "unproductive": 0}
+    for search in searches:
+        key = _norm_query(search)
+        counts["proven" if leads.get(key) else "unproductive" if posts.get(key) else "untried"] += 1
+    return ordered, counts
+
+
 def run(
     settings: Settings,
     keys: Keys,
@@ -153,6 +199,14 @@ def run(
     # 1. Plan
     plan = resolve_plan(settings, store, get_llm, use_x=use_x, use_linkedin=use_linkedin, replan=replan)
     result = RunResult(plan=plan, dry_run=dry_run, only_new=only_new)
+    ranking = None
+    if use_linkedin and plan.linkedin_keywords:
+        # Search the keywords that have produced leads first. With an Apify budget set, the
+        # ones at the end of the list are the ones that go unsearched.
+        history_from = (now - timedelta(days=SEARCH_HISTORY_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        history = store.search_history(settings.target, "linkedin", history_from)
+        if history:
+            plan.linkedin_keywords, ranking = rank_searches(plan.linkedin_keywords, history, settings.min_confidence)
     log(f"\nSearch plan (from {plan.source}):")
     for query in plan.x_queries:
         log(f"  X         {query}")
@@ -178,11 +232,20 @@ def run(
             log(f"! {warning}")
     if use_linkedin and plan.linkedin_keywords:
         cap = len(plan.linkedin_keywords) * settings.linkedin.max_posts_per_keyword
-        limit = settings.linkedin.max_charge_usd
-        log(
-            f"LinkedIn: up to {cap} posts via {settings.linkedin.actor_id}"
-            + (f" (Apify spending limit ${limit:.2f})" if limit is not None else "")
-        )
+        budget, limit = settings.linkedin.max_cost_usd, settings.linkedin.max_charge_usd
+        if budget is not None:
+            note = f" (Apify budget ${budget:.2f} for this run; searching stops when it is spent)"
+        elif limit is not None:
+            note = f" (Apify spending limit ${limit:.2f} per Actor run)"
+        else:
+            note = ""
+        log(f"LinkedIn: up to {cap} posts via {settings.linkedin.actor_id}{note}")
+        if ranking:
+            log(
+                f"  Keywords are searched best first, going by the last {SEARCH_HISTORY_DAYS} days: "
+                f"{ranking['proven']} have produced leads, {ranking['untried']} are untried, "
+                f"{ranking['unproductive']} have produced none."
+            )
 
     if dry_run:
         log("\nDry run: nothing was collected and no API credits were spent on X or Apify.")
@@ -272,10 +335,14 @@ def _report_costs(result: RunResult, settings: Settings, llm: Any, x: Any, linke
     runs = getattr(linkedin, "runs", 0)
     if runs:
         known = getattr(linkedin, "cost_known", False)
+        detail = f"{runs} {'run' if runs == 1 else 'runs'}, {getattr(linkedin, 'items', 0):,} items"
+        searched, planned = getattr(linkedin, "keywords_searched", 0), getattr(linkedin, "keywords_total", 0)
+        if searched < planned:
+            detail += f", {searched} of {planned} keywords"
         result.costs.append(
             CostLine(
                 "Apify",
-                f"{runs} {'run' if runs == 1 else 'runs'}, {getattr(linkedin, 'items', 0):,} items",
+                detail,
                 linkedin.cost_usd if known else None,
                 "reported by Apify" if known else "see the Apify console",
             )
@@ -311,9 +378,10 @@ def _export(
     result.lead_items = leads
     included = CONFIDENCE_LEVELS[: CONFIDENCE_LEVELS.index(settings.min_confidence) + 1]
     result.leads_by_confidence = {level: sum(1 for lead in leads if lead.confidence == level) for level in included}
-    breakdown = ", ".join(f"{count} {level}" for level, count in result.leads_by_confidence.items())
+    breakdown = ", ".join(f"{count} {level}" for level, count in result.leads_by_confidence.items() if count)
     kind = "new leads" if result.only_new else "leads"
-    log(f"\n{result.leads} {kind} ({breakdown}) written to:\n  {result.csv_path}\n  {result.xlsx_path}")
+    summary = f"{result.leads} {kind}" + (f" ({breakdown})" if breakdown else "")
+    log(f"\n{summary} written to:\n  {result.csv_path}\n  {result.xlsx_path}")
 
 
 def export_only(settings: Settings, *, log: Log = print, store: Store | None = None, now: datetime | None = None) -> RunResult:

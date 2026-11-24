@@ -147,6 +147,16 @@ class Store:
         ).fetchall()
         return [(_post(r), Classification.from_dict(json.loads(r["data"]))) for r in rows]
 
+    def search_history(self, target: str, platform: str, first_seen_from: str) -> list[tuple[str, Classification]]:
+        """The search that found each classified post on `platform` since `first_seen_from`,
+        with the post's classification. Used to see which searches lead anywhere."""
+        rows = self._db.execute(
+            "SELECT p.matched_query, c.data FROM posts p JOIN classifications c ON c.url = p.url AND c.target = ? "
+            "WHERE p.platform = ? AND p.matched_query != '' AND p.first_seen >= ?",
+            (target, platform, first_seen_from),
+        ).fetchall()
+        return [(r["matched_query"], Classification.from_dict(json.loads(r["data"]))) for r in rows]
+
     def get_plan(self, target: str, version: int) -> QueryPlan | None:
         """The cached search plan, unless it was made under older planning rules."""
         row = self._db.execute("SELECT plan FROM plans WHERE target = ?", (target,)).fetchone()

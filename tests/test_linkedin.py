@@ -142,3 +142,67 @@ def test_helpers():
     assert fill_input({"x": "$keywords", "y": ["$max_posts", "plain"]}, {"keywords": ["k"], "max_posts": 3}) == {
         "x": ["k"], "y": [3, "plain"],
     }
+
+
+def _budget_handler(inputs, limits, cost=None, status="SUCCEEDED"):
+    import json
+
+    def handler(request):
+        if request.method == "POST":
+            inputs.append(json.loads(request.content)["search"])
+            limits.append(request.url.params.get("maxTotalChargeUsd"))
+            run = len(inputs)
+            return httpx.Response(201, json={"data": {"id": f"r{run}", "status": status, "defaultDatasetId": f"d{run}"}})
+        kind, name = request.url.path.split("/")[2:4]
+        if kind == "actor-runs":
+            data = {"id": name, "status": status, "defaultDatasetId": "d" + name[1:]}
+            if cost is not None:
+                data["usageTotalUsd"] = cost
+            return httpx.Response(200, json={"data": data})
+        return httpx.Response(200, json=[{"type": "post", "content": f"post {name}", "post_url": f"https://l/{name}",
+                                          "posted_at": "2026-11-12"}])
+
+    return handler
+
+
+def test_budget_stops_the_search_and_leaves_out_the_last_keywords():
+    inputs, limits, logs = [], [], []
+    settings = LinkedInSettings(max_keywords_per_run=2, max_cost_usd=0.10)
+    collector = make(_budget_handler(inputs, limits, cost=0.06), settings, logs)
+    posts = collector.search(["a", "b", "c", "d", "e"], date(2026, 11, 7), 10)
+
+    assert inputs == [["a", "b"]] and limits == ["0.1"]         # 4 cents left is not worth another run
+    assert len(posts) == 1 and collector.cost_usd == 0.06
+    assert (collector.keywords_searched, collector.keywords_total) == (2, 5)
+    assert any("Apify budget of $0.10 reached: 3 of 5 keywords were not searched" in line for line in logs)
+
+
+def test_each_run_is_limited_to_what_is_left_of_the_budget():
+    inputs, limits = [], []
+    settings = LinkedInSettings(max_keywords_per_run=2, max_cost_usd=0.20)
+    collector = make(_budget_handler(inputs, limits, cost=0.06), settings)
+    collector.search(["a", "b", "c", "d", "e"], date(2026, 11, 7), 10)
+    assert limits == ["0.2", "0.14", "0.08"] and len(inputs) == 3
+    assert (collector.keywords_searched, collector.keywords_total) == (5, 5)
+
+    # The per-run limit still applies when it is the lower of the two. A run whose cost Apify
+    # does not report is counted as having used its whole limit.
+    inputs, limits = [], []
+    settings = LinkedInSettings(max_keywords_per_run=2, max_cost_usd=1.0, max_charge_usd=0.6)
+    collector = make(_budget_handler(inputs, limits), settings)
+    collector.search(["a", "b", "c", "d", "e"], date(2026, 11, 7), 10)
+    assert limits == ["0.6", "0.4"] and collector.keywords_searched == 4 and not collector.cost_known
+
+    # No budget: every run gets the per-run limit, as before.
+    inputs, limits = [], []
+    collector = make(_budget_handler(inputs, limits, cost=5.0), LinkedInSettings(max_keywords_per_run=2))
+    collector.search(["a", "b", "c"], date(2026, 11, 7), 10)
+    assert limits == ["3.0", "3.0"]
+
+
+def test_run_stopped_early_keeps_what_it_returned():
+    inputs, limits, logs = [], [], []
+    collector = make(_budget_handler(inputs, limits, cost=0.5, status="ABORTED"), logs=logs)
+    posts = collector.search(["a"], date(2026, 11, 7), 10)
+    assert [p.url for p in posts] == ["https://l/d1"] and collector.cost_usd == 0.5
+    assert any("ended with status ABORTED; keeping the 1 items" in line for line in logs)

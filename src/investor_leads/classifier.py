@@ -24,7 +24,9 @@ MATCH = ["yes", "no", "unknown"]
 INDUSTRY_MATCH = ["yes", "generalist", "no", "unknown"]
 NAMED_KINDS = ["vc_firm", "angel", "corporate_vc", "accelerator", "family_office", "fund_of_funds", "strategic", "other"]
 NAMED_ACTIONS = ["invested", "launched_fund", "seeking_deals", "mentioned_only"]
-CONFIDENCE_LEVELS = ["high", "medium", "low"]  # strongest first
+CONFIDENCE_LEVELS = ["high", "medium-high", "medium", "low"]  # strongest first
+# An author's medium lead is lifted to "medium-high" from this intent score up.
+STRONG_SCORE = 60
 
 POST_TEXT_MAX_CHARS = 3000
 MAX_NAMED_INVESTORS = 10
@@ -298,6 +300,10 @@ def classify_posts(
 # The aim is a list of real investors. Someone has to be an investor AND show either a fit
 # with the target industries or an investing signal to appear at all. Where the fit is only
 # partial they are kept and labelled "low", not dropped.
+#
+# "medium-high" is the stronger half of what would otherwise be "medium": the stage is
+# confirmed, or the signal is firmer. Setting min_confidence to "medium-high" keeps those
+# and the "high" leads, and leaves the rest out.
 # ---------------------------------------------------------------------------------------
 
 
@@ -318,7 +324,9 @@ def author_confidence(c: Classification) -> str | None:
     if in_industry and explicit_ask:
         return "high"
     if in_industry and stage_ok and signal and c.intent_score >= 40:
-        return "medium"
+        # Stronger when they say they invest at a target stage, or the signal is firm.
+        strong = c.stage_match == "yes" or c.intent_score >= STRONG_SCORE
+        return "medium-high" if strong else "medium"
     if c.industry_match == "generalist" and explicit_ask:
         return "medium"  # a generalist explicitly asking for deals
     return "low"
@@ -329,7 +337,9 @@ def named_confidence(n: NamedInvestor) -> str | None:
 
     The post has to show them doing something: making an investment, launching a fund, or
     looking for deals. A named investor never rates "high", because a deal shows activity
-    but not that they are asking for pitches.
+    but not that they are asking for pitches. They rate "medium-high" when the post makes
+    clear what kind of investor they are and either the round is at a target stage or they
+    have fresh money to place (a new fund, or a stated search for deals).
     """
     if n.industry_match not in ("yes", "generalist"):
         return None  # deals outside the target industries, or where the industry is not known
@@ -337,7 +347,17 @@ def named_confidence(n: NamedInvestor) -> str | None:
         return None
     if n.kind == "strategic" or n.industry_match == "generalist":
         return "low"  # funds projects without being an investment firm, or has no sector focus
-    return "medium" if n.stage_match != "no" else "low"
+    if n.stage_match == "no":
+        return "low"
+    confirmed = n.kind != "other" and (n.stage_match == "yes" or n.action in ("launched_fund", "seeking_deals"))
+    return "medium-high" if confirmed else "medium"
+
+
+def is_lead(c: Classification, minimum: str) -> bool:
+    """True when a post yields any lead at `minimum` or stronger: its author, or someone it names."""
+    if meets(author_confidence(c), minimum):
+        return True
+    return any(meets(named_confidence(n), minimum) for n in c.named_investors)
 
 
 def meets(confidence: str | None, minimum: str) -> bool:

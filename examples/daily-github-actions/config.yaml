@@ -4,12 +4,16 @@
 industry: "gaming, entertainment"
 stage: "pre-seed, seed"
 
+# Uncomment to list only the stronger leads: high, plus the firmer half of medium.
+# min_confidence: medium-high
+
 x:
   max_queries: 30
   max_posts_per_query: 10     # worst case $4.50 a day; a typical day is far less
 linkedin:
   max_keywords: 30
   max_posts_per_keyword: 25
+  # max_cost_usd: 3.0         # daily Apify budget; the keywords that work are searched first
 
 email:
   to:

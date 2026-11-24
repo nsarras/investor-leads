@@ -234,3 +234,36 @@ def test_anthropic_wrapper_raises_on_refusal_or_bad_json():
         AnthropicJSON("k", "m", client=_Client(_Response([], "refusal"))).json(system="s", user="u", schema={})
     with pytest.raises(LLMError, match="invalid JSON"):
         AnthropicJSON("k", "m", client=_Client(_Response([_Block("text", "nope")]))).json(system="s", user="u", schema={})
+
+
+def test_medium_high_is_the_stronger_half_of_medium():
+    from investor_leads.classifier import CONFIDENCE_LEVELS, is_lead
+
+    assert CONFIDENCE_LEVELS == ["high", "medium-high", "medium", "low"]
+    # An author: a firm signal, or a stated match with a target stage, lifts medium to medium-high.
+    thesis = dict(intent="thesis_or_commentary")
+    assert author_confidence(judged(intent_score=59, **thesis)) == "medium"
+    assert author_confidence(judged(intent_score=60, **thesis)) == "medium-high"
+    assert author_confidence(judged(intent_score=45, intent="announced_investment", stage_match="yes")) == "medium-high"
+    assert author_confidence(judged(intent_score=45, intent="announced_investment")) == "medium"
+    assert author_confidence(judged(industry_match="generalist", intent_score=90)) == "medium"   # generalists stay medium
+
+    # A named investor: a known kind of investor, plus a round at a target stage or fresh money to place.
+    def named(**changes):
+        return named_confidence(NamedInvestor("Play Ventures", **{"industry_match": "yes", "kind": "vc_firm", **changes}))
+
+    assert named(stage_match="yes") == "medium-high"
+    assert named(stage_match="unknown") == "medium"
+    assert named(stage_match="unknown", action="launched_fund") == "medium-high"
+    assert named(stage_match="unknown", action="seeking_deals", kind="angel") == "medium-high"
+    assert named(stage_match="yes", kind="other") == "medium"       # the post does not make clear what they are
+    assert named(stage_match="no", action="launched_fund") == "low"
+
+    assert meets("high", "medium-high") and meets("medium-high", "medium-high") and meets("medium-high", "medium")
+    assert not meets("medium", "medium-high") and not meets("medium-high", "high")
+
+    # is_lead: the author, or anyone the post names.
+    news = judged(is_investor=False, named_investors=[NamedInvestor("Play Ventures", industry_match="yes",
+                                                                    kind="vc_firm", stage_match="yes")])
+    assert is_lead(news, "medium-high") and not is_lead(news, "high")
+    assert is_lead(judged(), "high") and not is_lead(judged(is_investor=False), "low")
